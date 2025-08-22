@@ -15,6 +15,9 @@ use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 use Shopware\Core\Checkout\Order\Aggregate\OrderTransaction\OrderTransactionStates;
 use Shopware\Core\Checkout\Cart\Event\CheckoutOrderPlacedEvent;
 use Symfony\Component\HttpFoundation\RequestStack;
+use Symfony\Component\HttpFoundation\Cookie;
+use Symfony\Component\HttpFoundation\Response;
+use Shopware\Core\Framework\Event\BeforeSendResponseEvent;
 
 class OrderStateChangeSubscriber implements EventSubscriberInterface
 {
@@ -48,6 +51,7 @@ class OrderStateChangeSubscriber implements EventSubscriberInterface
         return [
             'state_machine.order_transaction.state_changed' => 'onOrderTransactionStateChange',
             CheckoutOrderPlacedEvent::class => 'onCheckoutOrderPlaced',
+            BeforeSendResponseEvent::class => 'onBeforeSendResponse',
         ];
     }
 
@@ -60,6 +64,14 @@ class OrderStateChangeSubscriber implements EventSubscriberInterface
 
         // Get the order transaction ID from the event
         $orderTransactionId = $event->getTransition()->getEntityId();
+        
+        // Enhanced logging to track duplicate events
+        $this->logger->info('Transaction state changed to paid - processing webhook', [
+            'transactionId' => $orderTransactionId,
+            'eventTimestamp' => (new \DateTime())->format(\DateTime::ATOM),
+            'fromState' => $event->getPreviousState()->getTechnicalName(),
+            'toState' => $event->getNextState()->getTechnicalName()
+        ]);
         
         // First, load the transaction to get the order ID
         $transactionCriteria = new Criteria([$orderTransactionId]);
@@ -93,24 +105,26 @@ class OrderStateChangeSubscriber implements EventSubscriberInterface
 
         $order = $orders->first();
         
-        // Debug logging
-        $this->logger->info('Order loaded for webhook', [
+        $this->logger->info('Order loaded for webhook processing', [
             'orderId' => $order->getId(),
             'orderNumber' => $order->getOrderNumber(),
-            'transactionId' => $orderTransactionId
+            'transactionId' => $orderTransactionId,
+            'processingTimestamp' => (new \DateTime())->format(\DateTime::ATOM)
         ]);
         
-        // Check if webhook was already sent for this order
-        if ($this->isWebhookAlreadySent($order)) {
-            $this->logger->info('Webhook already sent for order, skipping', [
+        if ($this->isWebhookAlreadySentForTransaction($order, $orderTransactionId)) {
+            $this->logger->info('Webhook already sent for this transaction, skipping', [
                 'orderId' => $order->getId(),
-                'orderNumber' => $order->getOrderNumber()
+                'orderNumber' => $order->getOrderNumber(),
+                'transactionId' => $orderTransactionId
             ]);
             return;
         }
         
+        $this->markWebhookAsProcessing($order, $orderTransactionId, $event->getContext());
+        
         // Send webhook
-        $this->sendWebhook($order, $event->getContext());
+        $this->sendWebhook($order, $orderTransactionId, $event->getContext());
     }
 
     public function onCheckoutOrderPlaced(CheckoutOrderPlacedEvent $event): void
@@ -157,7 +171,46 @@ class OrderStateChangeSubscriber implements EventSubscriberInterface
         }
     }
 
-    private function sendWebhook($order, Context $context): void
+    /**
+     * Set the _taggingmk cookie on response if it doesn't exist
+     */
+    public function onBeforeSendResponse(BeforeSendResponseEvent $event): void
+    {
+        try {
+            $request = $event->getRequest();
+            $response = $event->getResponse();
+            
+            // Only set cookie if it doesn't already exist
+            if (!$request->cookies->has('_taggingmk')) {
+                $taggingMkId = $this->generateUuid();
+                
+                // Create cookie that expires in 1 year, secure and httpOnly for security
+                $cookie = Cookie::create(
+                    '_taggingmk',
+                    $taggingMkId,
+                    time() + (365 * 24 * 60 * 60), // 1 year
+                    '/', // path
+                    null, // domain (null = current domain)
+                    $request->isSecure(), // secure (only over HTTPS if request is secure)
+                    true, // httpOnly
+                    false, // raw
+                    Cookie::SAMESITE_LAX // sameSite
+                );
+                
+                $response->headers->setCookie($cookie);
+                
+                $this->logger->info('Set new _taggingmk cookie', [
+                    'taggingMkId' => $taggingMkId,
+                    'userAgent' => $request->headers->get('User-Agent'),
+                    'ip' => $this->getClientIpAddress($request)
+                ]);
+            }
+        } catch (\Exception $e) {
+            $this->logger->error('Failed to set _taggingmk cookie: ' . $e->getMessage());
+        }
+    }
+
+    private function sendWebhook($order, string $transactionId, Context $context): void
     {
         $webhookUrl = $this->systemConfigService->get('Tagging.config.webhookUrl');
 
@@ -172,7 +225,7 @@ class OrderStateChangeSubscriber implements EventSubscriberInterface
 
             try {
                 // Should be base 64 decoded and json decoded
-                $data = json_decode(base64_decode($customFields['trytagging_user_data']), true);
+                $data = json_decode(base64_decode($customFields['trytagging_user_data'] ?? ''), true);
 
                 if (is_array($data)) {
                     foreach ($data as $key => $value) {
@@ -180,6 +233,8 @@ class OrderStateChangeSubscriber implements EventSubscriberInterface
                     }
                 }
             } catch (\Exception $e) {
+                $this->logger->error('Failed to decode trytagging marketing data: ' . $e->getMessage());
+            } catch (\TypeError $e) {
                 $this->logger->error('Failed to decode trytagging marketing data: ' . $e->getMessage());
             }
 
@@ -259,20 +314,47 @@ class OrderStateChangeSubscriber implements EventSubscriberInterface
             $statusCode = $response->getStatusCode();
 
             if ($statusCode >= 200 && $statusCode < 300) {
-                $this->logger->info('Webhook sent successfully for order: ' . $order->getOrderNumber());
+                $this->logger->info('Webhook sent successfully', [
+                    'orderNumber' => $order->getOrderNumber(),
+                    'transactionId' => $transactionId,
+                    'statusCode' => $statusCode
+                ]);
                 
-                // Mark webhook as sent to prevent duplicates
-                $this->markWebhookAsSent($order, $context);
+                $this->markWebhookAsSent($order, $transactionId, $context);
             } else {
-                $this->logger->error('Webhook failed with status: ' . $statusCode . ' - Response: ' . $response->getBody());
+                $this->logger->error('Webhook failed with status', [
+                    'orderNumber' => $order->getOrderNumber(),
+                    'transactionId' => $transactionId,
+                    'statusCode' => $statusCode,
+                    'response' => $response->getBody()->getContents()
+                ]);
+                
+                $this->removeWebhookProcessingFlag($order, $transactionId, $context);
             }
         } catch (RequestException $e) {
-            $this->logger->error('Failed to send webhook: ' . $e->getMessage());
+            $this->logger->error('Failed to send webhook: ' . $e->getMessage(), [
+                'orderNumber' => $order->getOrderNumber(),
+                'transactionId' => $transactionId
+            ]);
             if ($e->hasResponse()) {
                 $this->logger->error('Response: ' . $e->getResponse()->getBody());
             }
+            
+            $this->removeWebhookProcessingFlag($order, $transactionId, $context);
         } catch (\Exception $e) {
-            $this->logger->error('Unexpected error sending webhook: ' . $e->getMessage());
+            $this->logger->error('Unexpected error sending webhook: ' . $e->getMessage(), [
+                'orderNumber' => $order->getOrderNumber(),
+                'transactionId' => $transactionId
+            ]);
+            
+            $this->removeWebhookProcessingFlag($order, $transactionId, $context);
+        } catch (\TypeError $e) {
+            $this->logger->error('Failed to send webhook: ' . $e->getMessage(), [
+                'orderNumber' => $order->getOrderNumber(),
+                'transactionId' => $transactionId
+            ]);
+            
+            $this->removeWebhookProcessingFlag($order, $transactionId, $context);
         }
     }
 
@@ -380,21 +462,90 @@ class OrderStateChangeSubscriber implements EventSubscriberInterface
     }
 
     /**
-     * Check if webhook has already been sent for this order
+     * Generate a random UUID v4
      */
-    private function isWebhookAlreadySent($order): bool
+    private function generateUuid(): string
     {
-        $customFields = $order->getCustomFields();
-        return isset($customFields['webhook_sent']) && $customFields['webhook_sent'] === true;
+        return sprintf(
+            '%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0x0fff) | 0x4000,
+            mt_rand(0, 0x3fff) | 0x8000,
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff)
+        );
     }
 
     /**
-     * Mark webhook as sent for this order
+     * Validate if string is a valid UUID
      */
-    private function markWebhookAsSent($order, Context $context): void
+    private function isValidUuid(string $uuid): bool
+    {
+        return preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i', $uuid) === 1;
+    }
+
+    /**
+     * Check if webhook has already been sent for this specific transaction
+     */
+    private function isWebhookAlreadySentForTransaction($order, string $transactionId): bool
+    {
+        $customFields = $order->getCustomFields();
+        $webhookKey = 'webhook_sent_' . $transactionId;
+        $processingKey = 'webhook_processing_' . $transactionId;
+        
+        // Check if webhook was already sent OR is currently being processed
+        return (isset($customFields[$webhookKey]) && $customFields[$webhookKey] === true) ||
+               (isset($customFields[$processingKey]) && $customFields[$processingKey] === true);
+    }
+
+    /**
+     * Mark webhook as being processed for this transaction (prevents duplicate sends)
+     */
+    private function markWebhookAsProcessing($order, string $transactionId, Context $context): void
     {
         try {
             $customFields = $order->getCustomFields() ?? [];
+            $processingKey = 'webhook_processing_' . $transactionId;
+            $customFields[$processingKey] = true;
+            $customFields[$processingKey . '_at'] = (new \DateTime())->format(\DateTime::ATOM);
+
+            $this->orderRepository->update([
+                [
+                    'id' => $order->getId(),
+                    'customFields' => $customFields,
+                ]
+            ], $context);
+
+            $this->logger->info('Marked webhook as processing for transaction', [
+                'orderId' => $order->getId(),
+                'orderNumber' => $order->getOrderNumber(),
+                'transactionId' => $transactionId
+            ]);
+        } catch (\Exception $e) {
+            $this->logger->error('Failed to mark webhook as processing: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * Mark webhook as successfully sent for this transaction
+     */
+    private function markWebhookAsSent($order, string $transactionId, Context $context): void
+    {
+        try {
+            $customFields = $order->getCustomFields() ?? [];
+            $webhookKey = 'webhook_sent_' . $transactionId;
+            $processingKey = 'webhook_processing_' . $transactionId;
+            
+            // Mark as sent and remove processing flag
+            $customFields[$webhookKey] = true;
+            $customFields[$webhookKey . '_at'] = (new \DateTime())->format(\DateTime::ATOM);
+            unset($customFields[$processingKey]);
+            unset($customFields[$processingKey . '_at']);
+            
+            // Keep backwards compatibility
             $customFields['webhook_sent'] = true;
             $customFields['webhook_sent_at'] = (new \DateTime())->format(\DateTime::ATOM);
 
@@ -405,12 +556,43 @@ class OrderStateChangeSubscriber implements EventSubscriberInterface
                 ]
             ], $context);
 
-            $this->logger->info('Marked webhook as sent for order', [
+            $this->logger->info('Marked webhook as sent for transaction', [
                 'orderId' => $order->getId(),
-                'orderNumber' => $order->getOrderNumber()
+                'orderNumber' => $order->getOrderNumber(),
+                'transactionId' => $transactionId
             ]);
         } catch (\Exception $e) {
             $this->logger->error('Failed to mark webhook as sent: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * Remove processing flag if webhook failed (allows retry)
+     */
+    private function removeWebhookProcessingFlag($order, string $transactionId, Context $context): void
+    {
+        try {
+            $customFields = $order->getCustomFields() ?? [];
+            $processingKey = 'webhook_processing_' . $transactionId;
+            
+            // Remove processing flag to allow retry
+            unset($customFields[$processingKey]);
+            unset($customFields[$processingKey . '_at']);
+
+            $this->orderRepository->update([
+                [
+                    'id' => $order->getId(),
+                    'customFields' => $customFields,
+                ]
+            ], $context);
+
+            $this->logger->info('Removed processing flag for failed webhook', [
+                'orderId' => $order->getId(),
+                'orderNumber' => $order->getOrderNumber(),
+                'transactionId' => $transactionId
+            ]);
+        } catch (\Exception $e) {
+            $this->logger->error('Failed to remove processing flag: ' . $e->getMessage());
         }
     }
 }
