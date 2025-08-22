@@ -1,6 +1,6 @@
 {
   "name": "tagginggroup/shopware",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "AdPage Tagging plugin for Shopware 6",
   "type": "shopware-platform-plugin",
   "license": "OSL-3.0",
