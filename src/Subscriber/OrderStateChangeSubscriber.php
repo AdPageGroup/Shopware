@@ -192,7 +192,7 @@ class OrderStateChangeSubscriber implements EventSubscriberInterface
                     '/', // path
                     null, // domain (null = current domain)
                     $request->isSecure(), // secure (only over HTTPS if request is secure)
-                    true, // httpOnly
+                    false, // httpOnly
                     false, // raw
                     Cookie::SAMESITE_LAX // sameSite
                 );
