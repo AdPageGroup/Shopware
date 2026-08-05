@@ -1,18 +1,26 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
         xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/shopware/platform/trunk/src/Core/System/SystemConfig/Schema/config.xsd">
-    
+
     <card>
         <title>AdPage Tagging</title>
         <title lang="de-DE">AdPage Tagging</title>
-        
+
         <input-field type="text">
             <name>webhookUrl</name>
             <label>AdPage Tagging URL</label>
             <label lang="de-DE">AdPage Tagging URL</label>
             <placeholder>https://tagging.example.com</placeholder>
-            <helpText>The URL where the webhook will be sent when an order is paid</helpText>
-            <helpText lang="de-DE">Die URL, an die der Webhook gesendet wird, wenn eine Bestellung bezahlt wurde</helpText>
+            <helpText>The HTTPS URL where the webhook will be sent when an order is paid</helpText>
+            <helpText lang="de-DE">Die HTTPS-URL, an die der Webhook gesendet wird, wenn eine Bestellung bezahlt wurde</helpText>
+        </input-field>
+
+        <input-field type="password">
+            <name>webhookSecret</name>
+            <label>Webhook Secret</label>
+            <label lang="de-DE">Webhook-Geheimnis</label>
+            <helpText>Shared secret for HMAC-SHA256 webhook signature (X-Webhook-Signature header)</helpText>
+            <helpText lang="de-DE">Gemeinsames Geheimnis für die HMAC-SHA256-Webhook-Signatur (X-Webhook-Signature-Header)</helpText>
         </input-field>
     </card>
 </config>
