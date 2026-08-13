@@ -23,4 +23,28 @@
             <helpText lang="de-DE">Gemeinsames Geheimnis für die HMAC-SHA256-Webhook-Signatur (X-Webhook-Signature-Header)</helpText>
         </input-field>
     </card>
+
+    <card>
+        <title>Consent</title>
+        <title lang="de-DE">Einwilligung</title>
+
+        <input-field type="text">
+            <name>consentCookieName</name>
+            <label>Consent cookie name</label>
+            <label lang="de-DE">Consent-Cookie-Name</label>
+            <placeholder>CookieConsent</placeholder>
+            <helpText>Name of the CMP consent cookie (e.g. CookieConsent for Cookiebot). The _taggingmk tracking cookie is only set when this cookie is present and the required category is granted. Leave empty to disable the tracking cookie entirely.</helpText>
+            <helpText lang="de-DE">Name des CMP-Consent-Cookies (z.B. CookieConsent für Cookiebot). Das _taggingmk-Tracking-Cookie wird nur gesetzt, wenn dieses Cookie vorhanden ist und die erforderliche Kategorie erteilt wurde. Leer lassen, um das Tracking-Cookie vollständig zu deaktivieren.</helpText>
+        </input-field>
+
+        <input-field type="text">
+            <name>consentCategory</name>
+            <label>Consent category</label>
+            <label lang="de-DE">Consent-Kategorie</label>
+            <placeholder>statistics</placeholder>
+            <defaultValue>statistics</defaultValue>
+            <helpText>The consent category required for the tracking cookie (e.g. statistics, marketing). Must match the category name used by your CMP.</helpText>
+            <helpText lang="de-DE">Die für das Tracking-Cookie erforderliche Consent-Kategorie (z.B. statistics, marketing). Muss mit dem Kategorienamen Ihrer CMP übereinstimmen.</helpText>
+        </input-field>
+    </card>
 </config>

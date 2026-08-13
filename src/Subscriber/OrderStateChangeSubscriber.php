@@ -20,6 +20,8 @@ use Tagging\MessageQueue\SendWebhookMessage;
 
 class OrderStateChangeSubscriber implements EventSubscriberInterface
 {
+    private const PROCESSING_FLAG_TTL_SECONDS = 600;
+
     public function __construct(
         private readonly EntityRepository $orderRepository,
         private readonly EntityRepository $orderTransactionRepository,
@@ -145,6 +147,10 @@ class OrderStateChangeSubscriber implements EventSubscriberInterface
             return;
         }
 
+        if (!$this->hasTrackingConsent($request)) {
+            return;
+        }
+
         try {
             $response = $event->getResponse();
             $taggingMkId = Uuid::randomHex();
@@ -167,14 +173,65 @@ class OrderStateChangeSubscriber implements EventSubscriberInterface
         }
     }
 
+    private function hasTrackingConsent($request): bool
+    {
+        $consentCookieName = $this->systemConfigService->get('Tagging.config.consentCookieName');
+
+        if (!$consentCookieName) {
+            return false;
+        }
+
+        $consentValue = $request->cookies->get($consentCookieName);
+
+        if (!$consentValue) {
+            return false;
+        }
+
+        $consentCategory = $this->systemConfigService->get('Tagging.config.consentCategory') ?: 'statistics';
+
+        // Cookiebot format: {stamp:'...',necessary:true,preferences:false,statistics:true,marketing:false}
+        if (preg_match('/' . preg_quote($consentCategory, '/') . ':true/', $consentValue)) {
+            return true;
+        }
+
+        // JSON format fallback
+        $decoded = json_decode($consentValue, true);
+        if (is_array($decoded) && !empty($decoded[$consentCategory])) {
+            return true;
+        }
+
+        return false;
+    }
+
     private function isWebhookAlreadySentForTransaction($order, string $transactionId): bool
     {
         $customFields = $order->getCustomFields();
         $webhookKey = 'webhook_sent_' . $transactionId;
         $processingKey = 'webhook_processing_' . $transactionId;
 
-        return (isset($customFields[$webhookKey]) && $customFields[$webhookKey] === true)
-            || (isset($customFields[$processingKey]) && $customFields[$processingKey] === true);
+        if (isset($customFields[$webhookKey]) && $customFields[$webhookKey] === true) {
+            return true;
+        }
+
+        if (isset($customFields[$processingKey]) && $customFields[$processingKey] === true) {
+            $processingAt = $customFields[$processingKey . '_at'] ?? null;
+
+            if ($processingAt) {
+                $elapsed = time() - strtotime($processingAt);
+                if ($elapsed > self::PROCESSING_FLAG_TTL_SECONDS) {
+                    $this->logger->warning('Stale processing flag detected, allowing retry', [
+                        'transactionId' => $transactionId,
+                        'processingAt' => $processingAt,
+                        'elapsedSeconds' => $elapsed,
+                    ]);
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        return false;
     }
 
     private function markWebhookAsProcessing($order, string $transactionId, Context $context): void
