@@ -6,6 +6,7 @@ use GuzzleHttp\Client;
 use GuzzleHttp\Exception\RequestException;
 use Psr\Log\LoggerInterface;
 use Shopware\Core\Checkout\Cart\LineItem\LineItem;
+use Shopware\Core\Framework\Api\Context\SystemSource;
 use Shopware\Core\Framework\Context;
 use Shopware\Core\Framework\DataAbstractionLayer\EntityRepository;
 use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
@@ -42,6 +43,22 @@ class SendWebhookHandler
         }
 
         $context = Context::createDefaultContext();
+
+        $lookupCriteria = new Criteria([$message->getOrderId()]);
+        $orderForLanguage = $this->orderRepository->search($lookupCriteria, $context)->first();
+
+        if (!$orderForLanguage) {
+            $this->logger->error('Order not found for webhook', ['orderId' => $message->getOrderId()]);
+            return;
+        }
+
+        $orderContext = new Context(
+            new SystemSource(),
+            [],
+            $orderForLanguage->getCurrencyId(),
+            [$orderForLanguage->getLanguageId()],
+        );
+
         $criteria = new Criteria([$message->getOrderId()]);
         $criteria->addAssociation('orderCustomer');
         $criteria->addAssociation('lineItems');
@@ -52,12 +69,7 @@ class SendWebhookHandler
         $criteria->addAssociation('deliveries.shippingOrderAddress.country');
         $criteria->addAssociation('deliveries.shippingOrderAddress.countryState');
 
-        $order = $this->orderRepository->search($criteria, $context)->first();
-
-        if (!$order) {
-            $this->logger->error('Order not found for webhook', ['orderId' => $message->getOrderId()]);
-            return;
-        }
+        $order = $this->orderRepository->search($criteria, $orderContext)->first();
 
         $transactionId = $message->getTransactionId();
 
@@ -94,12 +106,11 @@ class SendWebhookHandler
                 'shipping' => (float) $order->getShippingTotal(),
                 'tax' => (float) $order->getPrice()->getCalculatedTaxes()->getAmount(),
                 'items' => array_values(array_map(function ($lineItem) {
-                    $payload = $lineItem->getPayload();
-                    $variants = $this->extractVariantInfo($payload);
+                    $itemPayload = $lineItem->getPayload();
+                    $variants = $this->extractVariantInfo($itemPayload);
 
                     $itemData = [
-                        'item_id' => (string) $lineItem->getProductId(),
-                        'item_sku' => (string) ($payload['productNumber'] ?? ''),
+                        'item_id' => (string) ($itemPayload['productNumber'] ?? $lineItem->getProductId()),
                         'item_name' => $lineItem->getLabel(),
                         'quantity' => (int) $lineItem->getQuantity(),
                         'price' => (float) $lineItem->getUnitPrice(),
@@ -135,7 +146,9 @@ class SendWebhookHandler
         $headers = ['Content-Type' => 'application/json'];
 
         if ($webhookSecret) {
-            $headers['X-Webhook-Signature'] = hash_hmac('sha256', $body, $webhookSecret);
+            $timestamp = (string) time();
+            $headers['X-Webhook-Timestamp'] = $timestamp;
+            $headers['X-Webhook-Signature'] = hash_hmac('sha256', $timestamp . '.' . $body, $webhookSecret);
         }
 
         try {
@@ -153,7 +166,7 @@ class SendWebhookHandler
                     'statusCode' => $statusCode,
                 ]);
 
-                $this->markWebhookAsSent($order, $transactionId, $context);
+                $this->markWebhookAsSent($order, $transactionId, $orderContext);
             } else {
                 $this->logger->error('Webhook failed with status', [
                     'orderNumber' => $order->getOrderNumber(),
