@@ -111,6 +111,7 @@ class SendWebhookHandler
 
                     $itemData = [
                         'item_id' => (string) ($itemPayload['productNumber'] ?? $lineItem->getProductId()),
+                        'item_sku' => (string) ($itemPayload['productNumber'] ?? ''),
                         'item_name' => $lineItem->getLabel(),
                         'quantity' => (int) $lineItem->getQuantity(),
                         'price' => (float) $lineItem->getUnitPrice(),
