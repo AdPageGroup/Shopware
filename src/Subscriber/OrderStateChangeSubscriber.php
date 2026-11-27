@@ -7,6 +7,7 @@ use Shopware\Core\Framework\Context;
 use Shopware\Core\Framework\DataAbstractionLayer\EntityRepository;
 use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
 use Shopware\Core\Framework\Uuid\Uuid;
+use Shopware\Core\PlatformRequest;
 use Shopware\Core\System\StateMachine\Event\StateMachineStateChangeEvent;
 use Shopware\Core\System\SystemConfig\SystemConfigService;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
@@ -43,17 +44,13 @@ class OrderStateChangeSubscriber implements EventSubscriberInterface
 
     public function onOrderTransactionStateChange(StateMachineStateChangeEvent $event): void
     {
-        if ($event->getNextState()->getTechnicalName() !== OrderTransactionStates::STATE_PAID) {
+        $nextState = $event->getNextState()->getTechnicalName();
+
+        if ($nextState !== OrderTransactionStates::STATE_PAID && $nextState !== OrderTransactionStates::STATE_AUTHORIZED) {
             return;
         }
 
         $orderTransactionId = $event->getTransition()->getEntityId();
-
-        $this->logger->info('Transaction state changed to paid - dispatching webhook', [
-            'transactionId' => $orderTransactionId,
-            'fromState' => $event->getPreviousState()->getTechnicalName(),
-            'toState' => $event->getNextState()->getTechnicalName(),
-        ]);
 
         $transactionCriteria = new Criteria([$orderTransactionId]);
         $transactionCriteria->addAssociation('order');
@@ -76,6 +73,20 @@ class OrderStateChangeSubscriber implements EventSubscriberInterface
             $this->logger->error('Order not found: ' . $orderId);
             return;
         }
+
+        // Invoice / buy-now-pay-later methods stay "authorized" until capture,
+        // so sending on "authorized" is opt-in per sales channel.
+        if ($nextState === OrderTransactionStates::STATE_AUTHORIZED
+            && !$this->systemConfigService->getBool('Tagging.config.sendOnAuthorized', $order->getSalesChannelId())
+        ) {
+            return;
+        }
+
+        $this->logger->info('Transaction state changed to ' . $nextState . ' - dispatching webhook', [
+            'transactionId' => $orderTransactionId,
+            'fromState' => $event->getPreviousState()->getTechnicalName(),
+            'toState' => $nextState,
+        ]);
 
         if ($this->isWebhookAlreadySentForTransaction($order, $orderTransactionId)) {
             $this->logger->info('Webhook already sent for this transaction, skipping', [
@@ -175,7 +186,10 @@ class OrderStateChangeSubscriber implements EventSubscriberInterface
 
     private function hasTrackingConsent($request): bool
     {
-        $consentCookieName = $this->systemConfigService->get('Tagging.config.consentCookieName');
+        $salesChannelId = $request->attributes->get(PlatformRequest::ATTRIBUTE_SALES_CHANNEL_ID);
+        $salesChannelId = \is_string($salesChannelId) ? $salesChannelId : null;
+
+        $consentCookieName = $this->systemConfigService->getString('Tagging.config.consentCookieName', $salesChannelId);
 
         if (!$consentCookieName) {
             return false;
@@ -187,7 +201,7 @@ class OrderStateChangeSubscriber implements EventSubscriberInterface
             return false;
         }
 
-        $consentCategory = $this->systemConfigService->get('Tagging.config.consentCategory') ?: 'statistics';
+        $consentCategory = $this->systemConfigService->getString('Tagging.config.consentCategory', $salesChannelId) ?: 'statistics';
 
         // Cookiebot format: {stamp:'...',necessary:true,preferences:false,statistics:true,marketing:false}
         if (preg_match('/' . preg_quote($consentCategory, '/') . ':true/', $consentValue)) {

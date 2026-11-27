@@ -22,6 +22,15 @@
             <helpText>Shared secret for HMAC-SHA256 webhook signature (X-Webhook-Signature header)</helpText>
             <helpText lang="de-DE">Gemeinsames Geheimnis für die HMAC-SHA256-Webhook-Signatur (X-Webhook-Signature-Header)</helpText>
         </input-field>
+
+        <input-field type="bool">
+            <name>sendOnAuthorized</name>
+            <label>Also send when a payment is authorized</label>
+            <label lang="de-DE">Auch senden, wenn eine Zahlung autorisiert ist</label>
+            <defaultValue>false</defaultValue>
+            <helpText>Invoice and buy-now-pay-later methods keep the payment on "authorized" until it is captured, often at shipment. Enable this to send the webhook at checkout for those orders. Each payment is sent once, also when it later moves to "paid".</helpText>
+            <helpText lang="de-DE">Rechnungs- und Buy-now-pay-later-Zahlungsarten belassen die Zahlung bis zur Erfassung (oft beim Versand) auf "autorisiert". Aktivieren, um den Webhook für diese Bestellungen bereits beim Checkout zu senden. Jede Zahlung wird nur einmal gesendet, auch wenn sie später auf "bezahlt" wechselt.</helpText>
+        </input-field>
     </card>
 
     <card>

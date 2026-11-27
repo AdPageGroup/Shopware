@@ -22,3 +22,9 @@ for the url you should enter the connected url of your server container (you can
 https://gtm.tryforwarder.com
 ```
 
+All settings can be set per sales channel. A sales channel without its own value uses the "All Sales Channels" value, so a shop with one server container per storefront can configure each storefront separately.
+
+### Invoice and buy-now-pay-later payments
+
+By default the webhook is sent when an order's payment changes to "paid". Invoice and buy-now-pay-later methods keep the payment on "authorized" until it is captured, which is often at shipment. Enable **Also send when a payment is authorized** to send the webhook at checkout for those orders. Each payment is sent once, also when it later changes from "authorized" to "paid".
+
