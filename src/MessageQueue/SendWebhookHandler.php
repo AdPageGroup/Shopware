@@ -31,17 +31,6 @@ class SendWebhookHandler
 
     public function __invoke(SendWebhookMessage $message): void
     {
-        $webhookUrl = $this->systemConfigService->get('Tagging.config.webhookUrl');
-
-        if (!$webhookUrl) {
-            return;
-        }
-
-        if (!str_starts_with($webhookUrl, 'https://')) {
-            $this->logger->error('Webhook URL must use HTTPS', ['url' => $webhookUrl]);
-            return;
-        }
-
         $context = Context::createDefaultContext();
 
         $lookupCriteria = new Criteria([$message->getOrderId()]);
@@ -49,6 +38,24 @@ class SendWebhookHandler
 
         if (!$orderForLanguage) {
             $this->logger->error('Order not found for webhook', ['orderId' => $message->getOrderId()]);
+            return;
+        }
+
+        // Read the config for the order's sales channel; Shopware falls back to
+        // the "All Sales Channels" value when the channel has none.
+        $salesChannelId = $orderForLanguage->getSalesChannelId();
+        $webhookUrl = $this->systemConfigService->getString('Tagging.config.webhookUrl', $salesChannelId);
+
+        if ($webhookUrl === '') {
+            $this->logger->warning('Webhook URL not configured for sales channel, skipping', [
+                'orderNumber' => $orderForLanguage->getOrderNumber(),
+                'salesChannelId' => $salesChannelId,
+            ]);
+            return;
+        }
+
+        if (!str_starts_with($webhookUrl, 'https://')) {
+            $this->logger->error('Webhook URL must use HTTPS', ['url' => $webhookUrl]);
             return;
         }
 
@@ -143,7 +150,7 @@ class SendWebhookHandler
 
         $body = json_encode($payload);
 
-        $webhookSecret = $this->systemConfigService->get('Tagging.config.webhookSecret');
+        $webhookSecret = $this->systemConfigService->getString('Tagging.config.webhookSecret', $salesChannelId);
         $headers = ['Content-Type' => 'application/json'];
 
         if ($webhookSecret) {
